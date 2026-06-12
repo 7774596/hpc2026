@@ -1,0 +1,5 @@
+# 统一行尾：仓库内一律 LF，Windows 检出也不转换（避免 bash/Makefile 在 Linux 上出错）
+* text=auto eol=lf
+*.bat text eol=crlf
+*.pdf binary
+*.png binary

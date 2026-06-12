@@ -1,0 +1,21 @@
+# 构建产物
+build/
+*.o
+*.obj
+*.exe
+*.out
+verify_log.txt
+
+# 实验输出（配置和脚本入库，数据不入库）
+results/*
+!results/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
