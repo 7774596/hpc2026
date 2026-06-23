@@ -1,7 +1,7 @@
 // 调度器正确性测试：用手算可验证的小规模用例核对模拟结果。
 // 运行：make test
 //
-// TODO(B): 为 sjf 补充对应用例；新增调度策略时必须同步添加用例。
+// 新增调度策略时必须同步添加用例。
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -100,6 +100,85 @@ void test_fcfs_no_backfill() {
     CHECK(near(jobs[2].start_time, 110.0));
 }
 
+// 非严格 SJF：资源释放后在"放得下"的等待作业中选 runtime 最短者
+void test_sjf_shortest_first() {
+    std::vector<hpcsim::Job> jobs;
+    jobs.push_back(make_job(0, 0.0, 10.0, 2));  // 占满 2 核集群
+    jobs.push_back(make_job(1, 1.0, 20.0, 2));
+    jobs.push_back(make_job(2, 2.0, 5.0, 2));   // J0 结束后应先于 J1 启动
+    hpcsim::Simulator sim(hpcsim::Cluster(1, 2), hpcsim::make_scheduler("sjf"));
+    sim.run(jobs);
+
+    CHECK(near(jobs[2].start_time, 10.0));
+    CHECK(near(jobs[2].finish_time, 15.0));
+    CHECK(near(jobs[1].start_time, 15.0));
+    CHECK(near(jobs[1].finish_time, 35.0));
+}
+
+// 非严格 SJF：队首放不下时，仍可从后续等待作业中选最短的（区别于 FCFS 阻塞）
+void test_sjf_skip_blocked_head() {
+    std::vector<hpcsim::Job> jobs;
+    jobs.push_back(make_job(0, 0.0, 10.0, 2));  // 占 2 核，留 2 核空闲
+    jobs.push_back(make_job(1, 1.0, 5.0, 4));   // 需整集群，J0 运行期间放不下
+    jobs.push_back(make_job(2, 2.0, 3.0, 2));   // 2 核可装入空闲核
+    hpcsim::Simulator sim(hpcsim::Cluster(1, 4), hpcsim::make_scheduler("sjf"));
+    sim.run(jobs);
+
+    CHECK(near(jobs[2].start_time, 2.0));
+    CHECK(near(jobs[1].start_time, 10.0));
+}
+
+// 对照：相同负载下 FCFS 因队首 J1 放不下而阻塞 J2
+void test_fcfs_blocks_while_sjf_runs() {
+    std::vector<hpcsim::Job> jobs;
+    jobs.push_back(make_job(0, 0.0, 10.0, 2));
+    jobs.push_back(make_job(1, 1.0, 5.0, 4));
+    jobs.push_back(make_job(2, 2.0, 3.0, 2));
+    hpcsim::Simulator sim(hpcsim::Cluster(1, 4), hpcsim::make_scheduler("fcfs"));
+    sim.run(jobs);
+
+    CHECK(near(jobs[2].start_time, 15.0));  // 等 J1 跑完
+}
+
+// Backfilling 边界：插队作业若在 shadow 时刻之后完成，则不得回填
+void test_backfill_reject_late_job() {
+    std::vector<hpcsim::Job> jobs;
+    jobs.push_back(make_job(0, 0.0, 10.0, 2));   // shadow = 10
+    jobs.push_back(make_job(1, 1.0, 100.0, 4));
+    jobs.push_back(make_job(2, 2.0, 9.0, 2));     // 2 + 9 = 11 > 10，不可插队
+    hpcsim::Simulator sim(hpcsim::Cluster(1, 4), hpcsim::make_scheduler("backfill"));
+    sim.run(jobs);
+
+    CHECK(near(jobs[2].start_time, 110.0));  // 等 J1 结束后才能启动
+    CHECK(near(jobs[1].start_time, 10.0));
+}
+
+// RR 边界：quantum 大于作业时长时不触发抢占，行为接近 FCFS
+void test_rr_large_quantum_no_preempt() {
+    std::vector<hpcsim::Job> jobs;
+    jobs.push_back(make_job(0, 0.0, 10.0, 1));
+    jobs.push_back(make_job(1, 0.0, 10.0, 1));
+    hpcsim::Simulator sim(hpcsim::Cluster(1, 1), hpcsim::make_scheduler("rr", 100.0));
+    sim.run(jobs);
+
+    CHECK(near(jobs[0].start_time, 0.0));
+    CHECK(near(jobs[0].finish_time, 10.0));
+    CHECK(near(jobs[1].start_time, 10.0));
+    CHECK(near(jobs[1].finish_time, 20.0));
+}
+
+// RR 边界：remaining == quantum 时一次跑完，不多登记 TimeSliceExpire
+void test_rr_quantum_equals_runtime() {
+    std::vector<hpcsim::Job> jobs;
+    jobs.push_back(make_job(0, 0.0, 5.0, 1));
+    jobs.push_back(make_job(1, 0.0, 5.0, 1));
+    hpcsim::Simulator sim(hpcsim::Cluster(1, 1), hpcsim::make_scheduler("rr", 5.0));
+    sim.run(jobs);
+
+    CHECK(near(jobs[0].finish_time, 5.0));
+    CHECK(near(jobs[1].finish_time, 10.0));
+}
+
 // RR 抢占：单核集群、时间片 5，两个 10s 作业交替执行
 // 时间线：J1 跑 [0,5) 后回队尾 -> J2 跑 [5,10) -> J1 跑 [10,15] 完成 -> J2 跑 [15,20] 完成
 void test_rr_preemption() {
@@ -123,8 +202,14 @@ int main() {
     test_fcfs_blocking();
     test_fcfs_packing();
     test_cross_node_allocation();
+    test_sjf_shortest_first();
+    test_sjf_skip_blocked_head();
+    test_fcfs_blocks_while_sjf_runs();
     test_backfill();
+    test_backfill_reject_late_job();
     test_fcfs_no_backfill();
+    test_rr_large_quantum_no_preempt();
+    test_rr_quantum_equals_runtime();
     test_rr_preemption();
 
     if (g_failures == 0) {
