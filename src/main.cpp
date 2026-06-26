@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
 
         if (mode == "exec") {
 #ifdef HPCSIM_USE_MPI
-            return hpcsim::run_mpi(cfg, sched_name);
+            return hpcsim::run_mpi(cfg, sched_name, output_dir, tag);
 #else
             std::fprintf(stderr,
                          "exec mode is not available in this binary; build with `make mpi` "
