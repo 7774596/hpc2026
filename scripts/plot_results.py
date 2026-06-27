@@ -154,6 +154,126 @@ def scale(value, src_min, src_max, dst_min, dst_max):
     return dst_min + (value - src_min) * (dst_max - dst_min) / (src_max - src_min)
 
 
+def nice_number(value, round_value):
+    if value <= 0:
+        return 0.0
+    exponent = math.floor(math.log10(value))
+    fraction = value / (10 ** exponent)
+    if round_value:
+        if fraction < 1.5:
+            nice_fraction = 1.0
+        elif fraction < 3.0:
+            nice_fraction = 2.0
+        elif fraction < 7.0:
+            nice_fraction = 5.0
+        else:
+            nice_fraction = 10.0
+    else:
+        if fraction <= 1.0:
+            nice_fraction = 1.0
+        elif fraction <= 2.0:
+            nice_fraction = 2.0
+        elif fraction <= 5.0:
+            nice_fraction = 5.0
+        else:
+            nice_fraction = 10.0
+    return nice_fraction * (10 ** exponent)
+
+
+def y_axis(values, metric, target_ticks=6):
+    clean = [v for v in values if not is_nan(v)]
+    if not clean:
+        return 0.0, 1.0, [0.0, 0.25, 0.5, 0.75, 1.0]
+    data_min, data_max = min(clean), max(clean)
+    if data_max == data_min:
+        pad = abs(data_max) * 0.1 if data_max else 1.0
+        data_min -= pad
+        data_max += pad
+
+    # Ratios near 1.0 are unreadable on a zero-based axis, so use a focused
+    # axis range with explicit tick labels. Other non-negative metrics keep a
+    # zero baseline to avoid overstating differences.
+    focused = (
+        "utilization" in metric
+        or "efficiency" in metric
+        or "load_balance_cv" in metric
+    )
+    if focused:
+        span = data_max - data_min
+        lower = max(0.0, data_min - span * 0.15)
+        upper = data_max + span * 0.15
+    else:
+        lower = 0.0 if data_min >= 0 else data_min
+        upper = data_max
+
+    raw_step = (upper - lower) / float(max(1, target_ticks - 1))
+    step = nice_number(raw_step, True)
+    if step == 0:
+        step = 1.0
+    axis_min = math.floor(lower / step) * step
+    axis_max = math.ceil(upper / step) * step
+    if not focused and data_min >= 0:
+        axis_min = 0.0
+    ticks = []
+    value = axis_min
+    # Add a little tolerance so the final tick is not lost to floating error.
+    while value <= axis_max + step * 0.5:
+        ticks.append(0.0 if abs(value) < step * 1e-9 else value)
+        value += step
+    return axis_min, axis_max, ticks
+
+
+def tick_label(value):
+    if abs(value) < 1e-12:
+        return "0"
+    if abs(value) >= 1000:
+        return "%.0f" % value
+    if abs(value) >= 100:
+        return "%.1f" % value if value != int(value) else "%d" % int(value)
+    if abs(value) >= 10:
+        return "%.2f" % value if value != int(value) else "%d" % int(value)
+    if abs(value) >= 1:
+        return "%.3f" % value if value != int(value) else "%d" % int(value)
+    if abs(value) >= 0.01:
+        return "%.3f" % value
+    return "%.4f" % value
+
+
+def add_axes(parts, left, top, plot_w, plot_h, x_ticks, y_ticks, x_min, x_max, y_min, y_max):
+    for tick in y_ticks:
+        y = scale(tick, y_min, y_max, top + plot_h, top)
+        parts.append(
+            '<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#e2e8f0" stroke-width="1"/>'
+            % (left, y, left + plot_w, y)
+        )
+        parts.append(
+            '<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#334155"/>'
+            % (left - 4, y, left, y)
+        )
+        parts.append(
+            '<text x="%d" y="%.1f" text-anchor="end" dominant-baseline="middle" '
+            'font-size="11">%s</text>' % (left - 8, y, tick_label(tick))
+        )
+    for tick in x_ticks:
+        x = scale(tick, x_min, x_max, left, left + plot_w)
+        parts.append(
+            '<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" stroke="#334155"/>'
+            % (x, top + plot_h, x, top + plot_h + 4)
+        )
+        parts.append(
+            '<text x="%.1f" y="%d" text-anchor="middle" font-size="11">%s</text>'
+            % (x, top + plot_h + 18, tick_label(tick))
+        )
+    parts.append(
+        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#334155"/>'
+        % (left, top, left, top + plot_h)
+    )
+    parts.append(
+        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#334155"/>'
+        % (left, top + plot_h, left + plot_w, top + plot_h)
+    )
+
+
 def svg_bar(rows, metric, title, series_col):
     width, height = 900, 420
     left, right, top, bottom = 70, 20, 35, 95
@@ -182,10 +302,6 @@ def svg_bar(rows, metric, title, series_col):
             '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>'
             % (cx - bar_w / 2.0, y, bar_w, h, color)
         )
-        parts.append(
-            '<text x="%.1f" y="%.1f" text-anchor="middle" font-size="11">%.4g</text>'
-            % (cx, y - 5, value)
-        )
         label = html_escape(label_for(row, series_col).replace("\n", " "))
         parts.append(
             '<text x="%.1f" y="%d" text-anchor="middle" font-size="10" '
@@ -202,7 +318,7 @@ def svg_bar(rows, metric, title, series_col):
 
 def svg_line(rows, metric, title, x_col, series_col):
     width, height = 900, 420
-    left, right, top, bottom = 70, 150, 35, 65
+    left, right, top, bottom = 78, 150, 35, 72
     plot_w = width - left - right
     plot_h = height - top - bottom
     points = []
@@ -220,20 +336,17 @@ def svg_line(rows, metric, title, x_col, series_col):
     if not all_x or not all_y:
         return "<p>No numeric data for %s</p>" % html_escape(title)
     x_min, x_max = min(all_x), max(all_x)
-    y_min, y_max = min(0.0, min(all_y)), max(all_y)
-    if y_max == y_min:
-        y_max = y_min + 1.0
+    y_min, y_max, y_ticks = y_axis(all_y, metric)
+    x_ticks = sorted(set(all_x))
     parts = [
         '<svg viewBox="0 0 %d %d" width="%d" height="%d" xmlns="http://www.w3.org/2000/svg">'
         % (width, height, width, height),
         '<text x="%.1f" y="22" text-anchor="middle" font-size="18">%s</text>'
         % (width / 2.0, html_escape(title)),
-        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#334155"/>' % (left, top, left, top + plot_h),
-        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#334155"/>'
-        % (left, top + plot_h, left + plot_w, top + plot_h),
         '<text x="%.1f" y="%d" text-anchor="middle" font-size="12">%s</text>'
         % (left + plot_w / 2.0, height - 12, html_escape(x_col)),
     ]
+    add_axes(parts, left, top, plot_w, plot_h, x_ticks, y_ticks, x_min, x_max, y_min, y_max)
     for idx, pair in enumerate(points):
         name, group = pair
         color = COLORS[idx % len(COLORS)]
@@ -249,10 +362,6 @@ def svg_line(rows, metric, title, x_col, series_col):
             )
         for sx, sy, _, y in coords:
             parts.append('<circle cx="%.1f" cy="%.1f" r="3.5" fill="%s"/>' % (sx, sy, color))
-            parts.append(
-                '<text x="%.1f" y="%.1f" text-anchor="middle" font-size="10">%.4g</text>'
-                % (sx, sy - 7, y)
-            )
         legend_y = top + 20 + idx * 20
         parts.append(
             '<rect x="%d" y="%d" width="12" height="12" fill="%s"/>'
@@ -262,18 +371,6 @@ def svg_line(rows, metric, title, x_col, series_col):
             '<text x="%d" y="%d" font-size="12">%s</text>'
             % (left + plot_w + 42, legend_y, html_escape(name))
         )
-    parts.append(
-        '<text x="%d" y="%d" text-anchor="middle" font-size="11">%.4g</text>'
-        % (left, top + plot_h + 18, x_min)
-    )
-    parts.append(
-        '<text x="%d" y="%d" text-anchor="middle" font-size="11">%.4g</text>'
-        % (left + plot_w, top + plot_h + 18, x_max)
-    )
-    parts.append(
-        '<text x="%d" y="%d" text-anchor="end" font-size="11">%.4g</text>'
-        % (left - 8, top + 5, y_max)
-    )
     parts.append("</svg>")
     return "\n".join(parts)
 
