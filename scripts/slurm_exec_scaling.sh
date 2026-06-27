@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=hpcsim-exec
-#SBATCH --partition=normal
+#SBATCH --partition=cpu_96G
 #SBATCH --nodes=2
 #SBATCH --ntasks=9
 #SBATCH --cpus-per-task=4
 #SBATCH --time=00:30:00
 #SBATCH --output=results/slurm-exec-%j.out
 
-# Edit --partition and add --account if your cluster requires them.
+# Confirmed on the teaching HPC cluster:
+#   partition: cpu_96G
+#   compiler : compiler/gnu/10.2.0
+#   MPI      : mpi/openmpi/4.1.6
 # The default NP_LIST=2,3,5,9 must not exceed --ntasks.
 set -euo pipefail
 
 cd "$SLURM_SUBMIT_DIR"
 
 if command -v module >/dev/null 2>&1; then
-    module purge || true
-    module load compiler/gnu/10.2.0 || true
-    module load mpi/openmpi/4.1.6 || true
+    module purge
+    module load compiler/gnu/10.2.0
+    module load mpi/openmpi/4.1.6
 fi
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
