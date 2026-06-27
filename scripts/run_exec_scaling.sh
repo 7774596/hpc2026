@@ -15,6 +15,17 @@ NP_LIST=${3:-2,3,5,9}
 BIN=${BIN:-build/hpcsim_mpi}
 MPI_RUN=${MPI_RUN:-mpirun}
 SCHEDULER=${SCHEDULER:-fcfs}
+if [[ -z "${PYTHON:-}" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON=python3
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON=python
+    else
+        echo "python interpreter not found; load a Python module or set PYTHON=/path/to/python" >&2
+        exit 1
+    fi
+fi
+echo "python: $("$PYTHON" --version 2>&1)"
 
 if [[ ! -x "$BIN" ]]; then
     echo "binary $BIN not found, run 'make mpi' first" >&2
@@ -51,8 +62,8 @@ for raw_np in "${NPS[@]}"; do
     echo
 done
 
-python3 scripts/analyze_exec_scaling.py "$OUTDIR/exec_summary.csv" "$OUTDIR/exec_scaling.csv"
-python3 scripts/plot_results.py "$OUTDIR/exec_scaling.csv" \
+"$PYTHON" scripts/analyze_exec_scaling.py "$OUTDIR/exec_summary.csv" "$OUTDIR/exec_scaling.csv"
+"$PYTHON" scripts/plot_results.py "$OUTDIR/exec_scaling.csv" \
     --out-dir "$OUTDIR/plots" \
     --x num_workers \
     --series scheduler

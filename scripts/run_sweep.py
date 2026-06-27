@@ -1,20 +1,20 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
+
 """Run reproducible simulation sweeps and aggregate the results.
 
-This script is intentionally dependency-free so it can run on login nodes and
-compute nodes without a Python package setup.
+This script is dependency-free and supports both Python 2.7 and Python 3.
 """
 
 import argparse
 import csv
 import itertools
+import math
 import os
 import re
 import shutil
-import statistics
 import subprocess
 import sys
-from pathlib import Path
 
 
 SCHEDULERS = ["fcfs", "sjf", "rr", "backfill"]
@@ -28,6 +28,11 @@ METRICS = [
 ]
 
 
+def makedirs(path):
+    if path and not os.path.isdir(path):
+        os.makedirs(path)
+
+
 def parse_csv_list(value, cast=str):
     parts = [p.strip() for p in value.split(",") if p.strip()]
     if not parts:
@@ -38,10 +43,22 @@ def parse_csv_list(value, cast=str):
         raise argparse.ArgumentTypeError(str(exc))
 
 
+def mean(values):
+    return sum(values) / float(len(values)) if values else 0.0
+
+
+def stdev(values):
+    if len(values) <= 1:
+        return 0.0
+    m = mean(values)
+    var = sum((v - m) * (v - m) for v in values) / float(len(values) - 1)
+    return math.sqrt(var)
+
+
 def read_config(path):
     values = {}
     key_re = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^#;]*)")
-    with open(path, encoding="utf-8") as f:
+    with open(path, "r") as f:
         for line in f:
             m = key_re.match(line)
             if m:
@@ -52,13 +69,13 @@ def read_config(path):
 def write_config(base_path, out_path, overrides):
     seen = set()
     key_re = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(base_path, encoding="utf-8") as src, open(out_path, "w", encoding="utf-8") as dst:
+    makedirs(os.path.dirname(out_path))
+    with open(base_path, "r") as src, open(out_path, "w") as dst:
         for line in src:
             m = key_re.match(line)
             if m and m.group(2) in overrides:
                 key = m.group(2)
-                dst.write(f"{m.group(1)}{key}{m.group(3)}{overrides[key]}\n")
+                dst.write("%s%s%s%s\n" % (m.group(1), key, m.group(3), overrides[key]))
                 seen.add(key)
             else:
                 dst.write(line)
@@ -66,32 +83,49 @@ def write_config(base_path, out_path, overrides):
         if missing:
             dst.write("\n# Added by scripts/run_sweep.py\n")
             for key in missing:
-                dst.write(f"{key} = {overrides[key]}\n")
+                dst.write("%s = %s\n" % (key, overrides[key]))
 
 
 def read_single_summary(path):
-    with open(path, newline="", encoding="utf-8") as f:
+    with open(path, "r") as f:
         rows = list(csv.DictReader(f))
     if len(rows) != 1:
-        raise RuntimeError(f"expected exactly one summary row in {path}, found {len(rows)}")
+        raise RuntimeError("expected exactly one summary row in %s, found %d" % (path, len(rows)))
     return rows[0]
 
 
 def format_tag(experiment, scheduler, seed, num_jobs, arrival_rate, nodes, rr_quantum):
     ar = str(arrival_rate).replace(".", "p")
     rq = str(rr_quantum).replace(".", "p")
-    return (
-        f"{experiment}_{scheduler}_seed{seed}_jobs{num_jobs}_"
-        f"arr{ar}_nodes{nodes}_rr{rq}"
+    return "%s_%s_seed%s_jobs%s_arr%s_nodes%s_rr%s" % (
+        experiment,
+        scheduler,
+        seed,
+        num_jobs,
+        ar,
+        nodes,
+        rq,
     )
+
+
+def run_command(cmd, cwd):
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+    )
+    out, _ = proc.communicate()
+    return proc.returncode, out
 
 
 def run_one(args, combo, base_values):
     scheduler, seed, num_jobs, arrival_rate, nodes, rr_quantum = combo
     tag = format_tag(args.experiment, scheduler, seed, num_jobs, arrival_rate, nodes, rr_quantum)
-    run_dir = args.output / "runs" / tag
-    cfg_path = args.output / "configs" / f"{tag}.ini"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = os.path.join(args.output, "runs", tag)
+    cfg_path = os.path.join(args.output, "configs", tag + ".ini")
+    makedirs(run_dir)
 
     overrides = {
         "seed": str(seed),
@@ -104,32 +138,28 @@ def run_one(args, combo, base_values):
     write_config(args.base_config, cfg_path, overrides)
 
     cmd = [
-        str(args.bin),
+        args.bin,
         "--config",
-        str(cfg_path),
+        cfg_path,
         "--scheduler",
         scheduler,
         "--output",
-        str(run_dir),
+        run_dir,
         "--tag",
         tag,
     ]
-    proc = subprocess.run(
-        cmd,
-        cwd=args.repo_root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    log_path = run_dir / "stdout.log"
-    log_path.write_text(proc.stdout, encoding="utf-8")
-    if proc.returncode != 0:
-        raise RuntimeError(f"run failed for {tag}; see {log_path}")
+    ret, stdout = run_command(cmd, args.repo_root)
+    log_path = os.path.join(run_dir, "stdout.log")
+    with open(log_path, "w") as f:
+        f.write(stdout)
+    if ret != 0:
+        raise RuntimeError("run failed for %s; see %s" % (tag, log_path))
 
-    row = read_single_summary(run_dir / "summary.csv")
+    row = read_single_summary(os.path.join(run_dir, "summary.csv"))
     if not args.save_jobs:
-        for jobs_csv in run_dir.glob("*_jobs.csv"):
-            jobs_csv.unlink()
+        for name in os.listdir(run_dir):
+            if name.endswith("_jobs.csv"):
+                os.unlink(os.path.join(run_dir, name))
 
     row.update(
         {
@@ -141,15 +171,15 @@ def run_one(args, combo, base_values):
             "nodes": str(nodes),
             "cores_per_node": base_values.get("cores_per_node", ""),
             "rr_quantum": str(rr_quantum),
-            "run_dir": str(run_dir),
+            "run_dir": run_dir,
         }
     )
     return row
 
 
 def write_csv(path, rows, fieldnames):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    makedirs(os.path.dirname(path))
+    with open(path, "w") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
@@ -177,18 +207,17 @@ def aggregate(raw_rows):
         agg["runs"] = str(len(rows))
         for metric in METRICS:
             values = [float(r[metric]) for r in rows]
-            agg[f"{metric}_mean"] = f"{statistics.mean(values):.10g}"
-            std = statistics.stdev(values) if len(values) > 1 else 0.0
-            agg[f"{metric}_std"] = f"{std:.10g}"
+            agg["%s_mean" % metric] = "%.10g" % mean(values)
+            agg["%s_std" % metric] = "%.10g" % stdev(values)
         out.append(agg)
     return out
 
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-config", default="configs/medium.ini", type=Path)
-    parser.add_argument("--bin", default="build/hpcsim", type=Path)
-    parser.add_argument("--output", default="results/sim_sweep", type=Path)
+    parser.add_argument("--base-config", default="configs/medium.ini")
+    parser.add_argument("--bin", default="build/hpcsim")
+    parser.add_argument("--output", default="results/sim_sweep")
     parser.add_argument("--experiment", default="sim_sweep")
     parser.add_argument("--schedulers", default="fcfs,sjf,rr,backfill")
     parser.add_argument("--seeds", default="7,11,13")
@@ -201,27 +230,27 @@ def parse_args(argv):
     parser.add_argument("--keep-going", action="store_true", help="continue after failed runs")
     args = parser.parse_args(argv)
 
-    args.repo_root = Path(__file__).resolve().parents[1]
-    args.base_config = (args.repo_root / args.base_config).resolve()
-    args.bin = (args.repo_root / args.bin).resolve()
-    args.output = (args.repo_root / args.output).resolve()
+    args.repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    args.base_config = os.path.abspath(os.path.join(args.repo_root, args.base_config))
+    args.bin = os.path.abspath(os.path.join(args.repo_root, args.bin))
+    args.output = os.path.abspath(os.path.join(args.repo_root, args.output))
     return args
 
 
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
-    if not args.base_config.exists():
-        print(f"base config not found: {args.base_config}", file=sys.stderr)
+    if not os.path.exists(args.base_config):
+        print("base config not found: %s" % args.base_config, file=sys.stderr)
         return 1
-    if not args.bin.exists():
-        print(f"binary not found: {args.bin}; run `make serial` first", file=sys.stderr)
+    if not os.path.exists(args.bin):
+        print("binary not found: %s; run `make serial` first" % args.bin, file=sys.stderr)
         return 1
 
     base_values = read_config(args.base_config)
     schedulers = parse_csv_list(args.schedulers)
     invalid = [s for s in schedulers if s not in SCHEDULERS]
     if invalid:
-        print(f"unknown scheduler(s): {', '.join(invalid)}", file=sys.stderr)
+        print("unknown scheduler(s): %s" % ", ".join(invalid), file=sys.stderr)
         return 1
 
     seeds = parse_csv_list(args.seeds, int)
@@ -232,9 +261,9 @@ def main(argv=None):
     nodes = parse_csv_list(args.nodes or base_values.get("nodes", "4"), int)
     rr_quantums = parse_csv_list(args.rr_quantums or base_values.get("rr_quantum", "50"), float)
 
-    if args.clean and args.output.exists():
+    if args.clean and os.path.exists(args.output):
         shutil.rmtree(args.output)
-    args.output.mkdir(parents=True, exist_ok=True)
+    makedirs(args.output)
 
     combos = []
     for scheduler, seed, nj, ar, nn in itertools.product(
@@ -250,15 +279,15 @@ def main(argv=None):
     for index, combo in enumerate(combos, 1):
         scheduler, seed, nj, ar, nn, q = combo
         print(
-            f"[{index}/{total}] scheduler={scheduler} seed={seed} "
-            f"num_jobs={nj} arrival_rate={ar} nodes={nn} rr_quantum={q}",
-            flush=True,
+            "[%d/%d] scheduler=%s seed=%s num_jobs=%s arrival_rate=%s nodes=%s rr_quantum=%s"
+            % (index, total, scheduler, seed, nj, ar, nn, q)
         )
+        sys.stdout.flush()
         try:
             raw_rows.append(run_one(args, combo, base_values))
         except Exception as exc:
             failures.append(str(exc))
-            print(f"[error] {exc}", file=sys.stderr)
+            print("[error] %s" % exc, file=sys.stderr)
             if not args.keep_going:
                 return 1
 
@@ -280,7 +309,7 @@ def main(argv=None):
         "load_balance_cv",
         "run_dir",
     ]
-    write_csv(args.output / "raw_results.csv", raw_rows, raw_fields)
+    write_csv(os.path.join(args.output, "raw_results.csv"), raw_rows, raw_fields)
     agg_rows = aggregate(raw_rows)
     agg_fields = [
         "experiment",
@@ -293,13 +322,13 @@ def main(argv=None):
         "runs",
     ]
     for metric in METRICS:
-        agg_fields.extend([f"{metric}_mean", f"{metric}_std"])
-    write_csv(args.output / "aggregate.csv", agg_rows, agg_fields)
+        agg_fields.extend(["%s_mean" % metric, "%s_std" % metric])
+    write_csv(os.path.join(args.output, "aggregate.csv"), agg_rows, agg_fields)
 
-    print(f"raw results      -> {args.output / 'raw_results.csv'}")
-    print(f"aggregate results -> {args.output / 'aggregate.csv'}")
+    print("raw results       -> %s" % os.path.join(args.output, "raw_results.csv"))
+    print("aggregate results -> %s" % os.path.join(args.output, "aggregate.csv"))
     if failures:
-        print(f"{len(failures)} run(s) failed", file=sys.stderr)
+        print("%d run(s) failed" % len(failures), file=sys.stderr)
         return 2
     return 0
 

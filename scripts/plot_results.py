@@ -1,19 +1,23 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
+
 """Plot simulation or exec-scaling CSV files.
 
-The script prefers matplotlib PNG output when matplotlib is installed. It also
-always writes a dependency-free HTML report with inline SVG charts, so plotting
-still works on restricted HPC environments.
+The script supports Python 2.7 and Python 3. It writes a dependency-free HTML
+report with inline SVG charts. If matplotlib is available, it also writes PNGs.
 """
 
 import argparse
 import csv
-import html
 import math
 import os
 import sys
 from collections import defaultdict
-from pathlib import Path
+
+try:
+    from html import escape as html_escape
+except ImportError:
+    from cgi import escape as html_escape
 
 
 METRICS = [
@@ -29,6 +33,12 @@ METRICS = [
 ]
 
 COLORS = ["#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6", "#06b6d4", "#64748b"]
+NAN = float("nan")
+
+
+def makedirs(path):
+    if path and not os.path.isdir(path):
+        os.makedirs(path)
 
 
 def try_import_matplotlib():
@@ -44,7 +54,7 @@ def try_import_matplotlib():
 
 
 def read_rows(path):
-    with open(path, newline="", encoding="utf-8") as f:
+    with open(path, "r") as f:
         return list(csv.DictReader(f))
 
 
@@ -52,7 +62,7 @@ def parse_filters(items):
     filters = []
     for item in items:
         if "=" not in item:
-            raise ValueError(f"invalid filter {item!r}; expected key=value")
+            raise ValueError("invalid filter %r; expected key=value" % item)
         key, value = item.split("=", 1)
         filters.append((key, value))
     return filters
@@ -68,7 +78,11 @@ def numeric(value):
     try:
         return float(value)
     except (TypeError, ValueError):
-        return math.nan
+        return NAN
+
+
+def is_nan(value):
+    return value != value
 
 
 def available_metrics(rows):
@@ -79,9 +93,9 @@ def available_metrics(rows):
     for key, title in METRICS:
         if key in columns:
             out.append((key, None, title))
-        elif f"{key}_mean" in columns:
-            err = f"{key}_std" if f"{key}_std" in columns else None
-            out.append((f"{key}_mean", err, title))
+        elif "%s_mean" % key in columns:
+            err = "%s_std" % key if "%s_std" % key in columns else None
+            out.append(("%s_mean" % key, err, title))
     return out
 
 
@@ -90,8 +104,8 @@ def label_for(row, series):
     details = []
     for key in ("num_jobs", "arrival_rate", "nodes", "rr_quantum", "num_workers"):
         if key in row and row[key] not in ("", "-"):
-            details.append(f"{key}={row[key]}")
-    return label if not details else f"{label}\n" + ",".join(details)
+            details.append("%s=%s" % (key, row[key]))
+    return label if not details else label + "\n" + ",".join(details)
 
 
 def group_rows(rows, series):
@@ -104,12 +118,12 @@ def group_rows(rows, series):
 def save_matplotlib_chart(plt, rows, metric, err_col, title, out_path, x_col, series_col):
     fig, ax = plt.subplots(figsize=(8, 4.8))
     if x_col:
-        for idx, (name, group) in enumerate(sorted(group_rows(rows, series_col).items())):
+        for _, (name, group) in enumerate(sorted(group_rows(rows, series_col).items())):
             group = sorted(group, key=lambda r: numeric(r.get(x_col)))
             xs = [numeric(r.get(x_col)) for r in group]
             ys = [numeric(r.get(metric)) for r in group]
             yerr = [numeric(r.get(err_col)) for r in group] if err_col else None
-            if yerr and any(v > 0 for v in yerr if not math.isnan(v)):
+            if yerr and any(v > 0 for v in yerr if not is_nan(v)):
                 ax.errorbar(xs, ys, yerr=yerr, marker="o", capsize=3, label=name)
             else:
                 ax.plot(xs, ys, marker="o", label=name)
@@ -121,7 +135,7 @@ def save_matplotlib_chart(plt, rows, metric, err_col, title, out_path, x_col, se
         yerr = [numeric(r.get(err_col)) for r in rows] if err_col else None
         x_pos = list(range(len(labels)))
         kwargs = {}
-        if yerr and any(v > 0 for v in yerr if not math.isnan(v)):
+        if yerr and any(v > 0 for v in yerr if not is_nan(v)):
             kwargs["yerr"] = yerr
             kwargs["capsize"] = 3
         ax.bar(x_pos, ys, color="#3b82f6", **kwargs)
@@ -136,7 +150,7 @@ def save_matplotlib_chart(plt, rows, metric, err_col, title, out_path, x_col, se
 
 def scale(value, src_min, src_max, dst_min, dst_max):
     if src_max == src_min:
-        return (dst_min + dst_max) / 2
+        return (dst_min + dst_max) / 2.0
     return dst_min + (value - src_min) * (dst_max - dst_min) / (src_max - src_min)
 
 
@@ -148,27 +162,40 @@ def svg_bar(rows, metric, title, series_col):
     max_v = max_v if max_v > 0 else 1.0
     plot_w = width - left - right
     plot_h = height - top - bottom
-    bar_w = plot_w / max(1, len(rows)) * 0.72
+    bar_w = plot_w / float(max(1, len(rows))) * 0.72
     parts = [
-        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
-        'xmlns="http://www.w3.org/2000/svg">',
-        f'<text x="{width / 2}" y="22" text-anchor="middle" font-size="18">{html.escape(title)}</text>',
-        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="#334155"/>',
-        f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" stroke="#334155"/>',
+        '<svg viewBox="0 0 %d %d" width="%d" height="%d" xmlns="http://www.w3.org/2000/svg">'
+        % (width, height, width, height),
+        '<text x="%.1f" y="22" text-anchor="middle" font-size="18">%s</text>'
+        % (width / 2.0, html_escape(title)),
+        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#334155"/>' % (left, top, left, top + plot_h),
+        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#334155"/>'
+        % (left, top + plot_h, left + plot_w, top + plot_h),
     ]
-    for i, (row, value) in enumerate(zip(rows, values)):
-        cx = left + (i + 0.5) * plot_w / max(1, len(rows))
+    for i, pair in enumerate(zip(rows, values)):
+        row, value = pair
+        cx = left + (i + 0.5) * plot_w / float(max(1, len(rows)))
         h = value / max_v * plot_h
         y = top + plot_h - h
         color = COLORS[i % len(COLORS)]
-        parts.append(f'<rect x="{cx - bar_w / 2:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" fill="{color}"/>')
-        parts.append(f'<text x="{cx:.1f}" y="{y - 5:.1f}" text-anchor="middle" font-size="11">{value:.4g}</text>')
-        label = html.escape(label_for(row, series_col).replace("\n", " "))
         parts.append(
-            f'<text x="{cx:.1f}" y="{top + plot_h + 18}" text-anchor="middle" '
-            f'font-size="10" transform="rotate(25 {cx:.1f} {top + plot_h + 18})">{label}</text>'
+            '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>'
+            % (cx - bar_w / 2.0, y, bar_w, h, color)
         )
-    parts.append(f'<text x="{left - 8}" y="{top + 5}" text-anchor="end" font-size="11">{max_v:.4g}</text>')
+        parts.append(
+            '<text x="%.1f" y="%.1f" text-anchor="middle" font-size="11">%.4g</text>'
+            % (cx, y - 5, value)
+        )
+        label = html_escape(label_for(row, series_col).replace("\n", " "))
+        parts.append(
+            '<text x="%.1f" y="%d" text-anchor="middle" font-size="10" '
+            'transform="rotate(25 %.1f %d)">%s</text>'
+            % (cx, top + plot_h + 18, cx, top + plot_h + 18, label)
+        )
+    parts.append(
+        '<text x="%d" y="%d" text-anchor="end" font-size="11">%.4g</text>'
+        % (left - 8, top + 5, max_v)
+    )
     parts.append("</svg>")
     return "\n".join(parts)
 
@@ -184,27 +211,31 @@ def svg_line(rows, metric, title, x_col, series_col):
         for row in group:
             x = numeric(row.get(x_col))
             y = numeric(row.get(metric))
-            if not math.isnan(x) and not math.isnan(y):
+            if not is_nan(x) and not is_nan(y):
                 series_points.append((x, y))
         if series_points:
             points.append((name, sorted(series_points)))
     all_x = [p[0] for _, group in points for p in group]
     all_y = [p[1] for _, group in points for p in group]
     if not all_x or not all_y:
-        return f"<p>No numeric data for {html.escape(title)}</p>"
+        return "<p>No numeric data for %s</p>" % html_escape(title)
     x_min, x_max = min(all_x), max(all_x)
     y_min, y_max = min(0.0, min(all_y)), max(all_y)
     if y_max == y_min:
         y_max = y_min + 1.0
     parts = [
-        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
-        'xmlns="http://www.w3.org/2000/svg">',
-        f'<text x="{width / 2}" y="22" text-anchor="middle" font-size="18">{html.escape(title)}</text>',
-        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="#334155"/>',
-        f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" stroke="#334155"/>',
-        f'<text x="{left + plot_w / 2}" y="{height - 12}" text-anchor="middle" font-size="12">{html.escape(x_col)}</text>',
+        '<svg viewBox="0 0 %d %d" width="%d" height="%d" xmlns="http://www.w3.org/2000/svg">'
+        % (width, height, width, height),
+        '<text x="%.1f" y="22" text-anchor="middle" font-size="18">%s</text>'
+        % (width / 2.0, html_escape(title)),
+        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#334155"/>' % (left, top, left, top + plot_h),
+        '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#334155"/>'
+        % (left, top + plot_h, left + plot_w, top + plot_h),
+        '<text x="%.1f" y="%d" text-anchor="middle" font-size="12">%s</text>'
+        % (left + plot_w / 2.0, height - 12, html_escape(x_col)),
     ]
-    for idx, (name, group) in enumerate(points):
+    for idx, pair in enumerate(points):
+        name, group = pair
         color = COLORS[idx % len(COLORS)]
         coords = []
         for x, y in group:
@@ -212,17 +243,37 @@ def svg_line(rows, metric, title, x_col, series_col):
             sy = scale(y, y_min, y_max, top + plot_h, top)
             coords.append((sx, sy, x, y))
         if len(coords) > 1:
-            path = " ".join(f"{sx:.1f},{sy:.1f}" for sx, sy, _, _ in coords)
-            parts.append(f'<polyline points="{path}" fill="none" stroke="{color}" stroke-width="2"/>')
+            path = " ".join("%.1f,%.1f" % (sx, sy) for sx, sy, _, _ in coords)
+            parts.append(
+                '<polyline points="%s" fill="none" stroke="%s" stroke-width="2"/>' % (path, color)
+            )
         for sx, sy, _, y in coords:
-            parts.append(f'<circle cx="{sx:.1f}" cy="{sy:.1f}" r="3.5" fill="{color}"/>')
-            parts.append(f'<text x="{sx:.1f}" y="{sy - 7:.1f}" text-anchor="middle" font-size="10">{y:.4g}</text>')
+            parts.append('<circle cx="%.1f" cy="%.1f" r="3.5" fill="%s"/>' % (sx, sy, color))
+            parts.append(
+                '<text x="%.1f" y="%.1f" text-anchor="middle" font-size="10">%.4g</text>'
+                % (sx, sy - 7, y)
+            )
         legend_y = top + 20 + idx * 20
-        parts.append(f'<rect x="{left + plot_w + 25}" y="{legend_y - 10}" width="12" height="12" fill="{color}"/>')
-        parts.append(f'<text x="{left + plot_w + 42}" y="{legend_y}" font-size="12">{html.escape(name)}</text>')
-    parts.append(f'<text x="{left}" y="{top + plot_h + 18}" text-anchor="middle" font-size="11">{x_min:.4g}</text>')
-    parts.append(f'<text x="{left + plot_w}" y="{top + plot_h + 18}" text-anchor="middle" font-size="11">{x_max:.4g}</text>')
-    parts.append(f'<text x="{left - 8}" y="{top + 5}" text-anchor="end" font-size="11">{y_max:.4g}</text>')
+        parts.append(
+            '<rect x="%d" y="%d" width="12" height="12" fill="%s"/>'
+            % (left + plot_w + 25, legend_y - 10, color)
+        )
+        parts.append(
+            '<text x="%d" y="%d" font-size="12">%s</text>'
+            % (left + plot_w + 42, legend_y, html_escape(name))
+        )
+    parts.append(
+        '<text x="%d" y="%d" text-anchor="middle" font-size="11">%.4g</text>'
+        % (left, top + plot_h + 18, x_min)
+    )
+    parts.append(
+        '<text x="%d" y="%d" text-anchor="middle" font-size="11">%.4g</text>'
+        % (left + plot_w, top + plot_h + 18, x_max)
+    )
+    parts.append(
+        '<text x="%d" y="%d" text-anchor="end" font-size="11">%.4g</text>'
+        % (left - 8, top + 5, y_max)
+    )
     parts.append("</svg>")
     return "\n".join(parts)
 
@@ -235,22 +286,24 @@ def write_html_report(path, rows, metrics, x_col, series_col, png_names):
         "section{margin:28px 0;} svg{max-width:100%;height:auto;border:1px solid #e2e8f0;}"
         "table{border-collapse:collapse}td,th{border:1px solid #cbd5e1;padding:4px 8px}</style>",
         "<h1>HPCSim Experiment Report</h1>",
-        f"<p>Rows plotted: {len(rows)}. Series: <code>{html.escape(series_col)}</code>.</p>",
+        "<p>Rows plotted: %d. Series: <code>%s</code>.</p>"
+        % (len(rows), html_escape(series_col)),
     ]
     if png_names:
         parts.append("<p>PNG files were also generated:</p><ul>")
         for name in png_names:
-            parts.append(f"<li><a href='{html.escape(name)}'>{html.escape(name)}</a></li>")
+            parts.append("<li><a href='%s'>%s</a></li>" % (html_escape(name), html_escape(name)))
         parts.append("</ul>")
     for metric, _, title in metrics:
-        parts.append(f"<section><h2>{html.escape(title)}</h2>")
+        parts.append("<section><h2>%s</h2>" % html_escape(title))
         if x_col:
             parts.append(svg_line(rows, metric, title, x_col, series_col))
         else:
             parts.append(svg_bar(rows, metric, title, series_col))
         parts.append("</section>")
     parts.append("</html>")
-    path.write_text("\n".join(parts), encoding="utf-8")
+    with open(path, "w") as f:
+        f.write("\n".join(parts))
 
 
 def parse_args(argv):
@@ -270,9 +323,9 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
-    csv_path = Path(args.csv_path)
-    if not csv_path.exists():
-        print(f"{csv_path} not found; run experiments first", file=sys.stderr)
+    csv_path = args.csv_path
+    if not os.path.exists(csv_path):
+        print("%s not found; run experiments first" % csv_path, file=sys.stderr)
         return 1
     rows = read_rows(csv_path)
     if not rows:
@@ -292,32 +345,24 @@ def main(argv=None):
     if not metrics:
         print("no known numeric metric columns found", file=sys.stderr)
         return 1
-    out_dir = Path(args.out_dir) if args.out_dir else csv_path.parent / "plots"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = args.out_dir if args.out_dir else os.path.join(os.path.dirname(csv_path), "plots")
+    makedirs(out_dir)
 
     plt = try_import_matplotlib()
     png_names = []
     if plt:
         for metric, err_col, title in metrics:
             name = metric.replace("_mean", "") + ".png"
-            save_matplotlib_chart(
-                plt,
-                rows,
-                metric,
-                err_col,
-                title,
-                out_dir / name,
-                args.x,
-                args.series,
-            )
+            out_path = os.path.join(out_dir, name)
+            save_matplotlib_chart(plt, rows, metric, err_col, title, out_path, args.x, args.series)
             png_names.append(name)
-            print(f"saved {out_dir / name}")
+            print("saved %s" % out_path)
     else:
         print("matplotlib not available; writing HTML/SVG report only", file=sys.stderr)
 
-    report = out_dir / "report.html"
+    report = os.path.join(out_dir, "report.html")
     write_html_report(report, rows, metrics, args.x, args.series, png_names)
-    print(f"saved {report}")
+    print("saved %s" % report)
     return 0
 
 

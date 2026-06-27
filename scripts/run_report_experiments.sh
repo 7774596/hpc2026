@@ -7,14 +7,24 @@
 # Tunable environment variables:
 #   SEEDS=7,11,13
 #   BASE_CONFIG=configs/medium.ini
-#   PYTHON=python3
+#   PYTHON=/path/to/python
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OUT_ROOT=${1:-results/report_experiments}
 SEEDS=${SEEDS:-7,11,13}
 BASE_CONFIG=${BASE_CONFIG:-configs/medium.ini}
-PYTHON=${PYTHON:-python3}
+if [[ -z "${PYTHON:-}" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON=python3
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON=python
+    else
+        echo "python interpreter not found; load a Python module or set PYTHON=/path/to/python" >&2
+        exit 1
+    fi
+fi
+echo "python: $("$PYTHON" --version 2>&1)"
 
 make serial
 mkdir -p "$OUT_ROOT"
